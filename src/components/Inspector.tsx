@@ -97,14 +97,14 @@ export default function Inspector({ nodes, selected, onSelect, onUpdate, onNorma
         }} />
         <div className="vector-field scale-field">
           <label>Skala seragam</label>
-          <div className="scale-input-wrap"><span className="scale-icon">↗</span><input type="text" value={String(selected.scale)}
+          <div className="scale-input-wrap"><span className="scale-icon">↗</span><input type="text" value={String(roundValue(selected.scale / selected.defaultScale, 1))}
             onChange={(event) => {
               const val = event.target.value;
               if (val.trim() === '') {
                 onUpdate(selected.id, { scale: selected.defaultScale });
               } else {
-                const next = roundValue(parseInput(val), 1);
-                onUpdate(selected.id, { scale: Math.max(0.001, next) });
+                const nextRelative = roundValue(parseInput(val), 1);
+                onUpdate(selected.id, { scale: Math.max(0.001, roundValue(nextRelative * selected.defaultScale, 3)) });
               }
             }}
             onBlur={(event) => {
@@ -112,17 +112,17 @@ export default function Inspector({ nodes, selected, onSelect, onUpdate, onNorma
               if (val.trim() === '') {
                 onUpdate(selected.id, { scale: selected.defaultScale });
               } else {
-                const next = roundValue(parseInput(val), 1);
-                onUpdate(selected.id, { scale: Math.max(0.001, next) });
+                const nextRelative = roundValue(parseInput(val), 1);
+                onUpdate(selected.id, { scale: Math.max(0.001, roundValue(nextRelative * selected.defaultScale, 3)) });
               }
             }}
             onKeyDown={(event) => {
               if (event.key === 'ArrowUp' || event.key === 'ArrowDown' || event.key === 'ArrowLeft' || event.key === 'ArrowRight') {
                 event.preventDefault();
-                const current = parseFloat(event.currentTarget.value) || selected.scale;
+                const currentRelative = parseFloat(event.currentTarget.value) || selected.scale / selected.defaultScale;
                 const isIncrease = event.key === 'ArrowUp' || event.key === 'ArrowRight';
-                const next = roundValue(current + (isIncrease ? 0.1 : -0.1), 1);
-                onUpdate(selected.id, { scale: Math.max(0.001, next) });
+                const nextRelative = roundValue(currentRelative + (isIncrease ? 0.1 : -0.1), 1);
+                onUpdate(selected.id, { scale: Math.max(0.001, roundValue(nextRelative * selected.defaultScale, 3)) });
               }
             }} /></div>
         </div>
