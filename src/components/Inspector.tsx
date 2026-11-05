@@ -1,3 +1,4 @@
+import { useState, useEffect } from 'react';
 import type { ModelNode, Vec3 } from '../lib/types';
 
 interface InspectorProps {
@@ -23,7 +24,59 @@ function roundValue(value: number, decimals: number): number {
 }
 
 function decimalsForStep(step: number): number {
-  return step === 1 ? 0 : 1;
+  return 3;
+}
+
+interface AxisInputProps {
+  label: string;
+  axis: 'X' | 'Y' | 'Z';
+  index: number;
+  value: number;
+  defaultValue: number;
+  dec: number;
+  step: number;
+  suffix?: string;
+  onChange: (axis: number, value: number) => void;
+}
+
+function AxisInput({ label, axis, index, value, defaultValue, dec, step, suffix, onChange }: AxisInputProps) {
+  const [draft, setDraft] = useState(String(value - defaultValue));
+
+  useEffect(() => {
+    setDraft(String(value - defaultValue));
+  }, [value, defaultValue]);
+
+  const commit = (raw: string) => {
+    const nextValue = roundValue(defaultValue + parseInput(raw), dec);
+    onChange(index, nextValue);
+  };
+
+  const handleKeyDown = (event: React.KeyboardEvent<HTMLInputElement>) => {
+    if (event.key === 'Enter') {
+      commit(event.currentTarget.value);
+    } else if (event.key === 'ArrowUp' || event.key === 'ArrowDown') {
+      event.preventDefault();
+      const currentOffset = parseFloat(event.currentTarget.value) || 0;
+      const isIncrease = event.key === 'ArrowUp';
+      const nextOffset = roundValue(currentOffset + (isIncrease ? step : -step), dec);
+      onChange(index, roundValue(defaultValue + nextOffset, dec));
+    }
+  };
+
+  return (
+    <div className="axis-input" key={axis}>
+      <span className={`axis axis-${axis.toLowerCase()}`}>{axis}</span>
+      <input
+        type="text"
+        value={draft}
+        onChange={(event) => setDraft(event.target.value)}
+        onBlur={(event) => commit(event.currentTarget.value)}
+        onKeyDown={handleKeyDown}
+        aria-label={`${label} ${axis}`}
+      />
+      {suffix && <small>{suffix}</small>}
+    </div>
+  );
 }
 
 function VectorField({ label, values, defaults, suffix, onChange, step = 1 }: {
@@ -36,38 +89,72 @@ function VectorField({ label, values, defaults, suffix, onChange, step = 1 }: {
 }) {
   const dec = decimalsForStep(step);
 
-  const handleKeyDown = (event: React.KeyboardEvent<HTMLInputElement>, index: number) => {
-    if (event.key === 'ArrowUp' || event.key === 'ArrowDown' || event.key === 'ArrowLeft' || event.key === 'ArrowRight') {
+  return (
+    <div className="vector-field">
+      <label>{label}</label>
+      <div className="axis-inputs">
+        {(['X', 'Y', 'Z'] as const).map((axis, index) => (
+          <AxisInput
+            key={axis}
+            label={label}
+            axis={axis}
+            index={index}
+            value={values[index]}
+            defaultValue={defaults[index]}
+            dec={dec}
+            step={step}
+            suffix={suffix}
+            onChange={onChange}
+          />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function ScaleInput({ value, defaultScale, scale, id, onUpdate }: {
+  value: number;
+  defaultScale: number;
+  scale: number;
+  id: string;
+  onUpdate: (id: string, changes: { scale: number }) => void;
+}) {
+  const [draft, setDraft] = useState(String(value));
+
+  useEffect(() => {
+    setDraft(String(value));
+  }, [value]);
+
+  const commit = (raw: string) => {
+    if (raw.trim() === '') {
+      onUpdate(id, { scale: defaultScale });
+      return;
+    }
+    const nextRelative = roundValue(parseInput(raw), 3);
+    onUpdate(id, { scale: Math.max(0.001, roundValue(nextRelative * defaultScale, 3)) });
+  };
+
+  const handleKeyDown = (event: React.KeyboardEvent<HTMLInputElement>) => {
+    if (event.key === 'Enter') {
+      commit(event.currentTarget.value);
+    } else if (event.key === 'ArrowUp' || event.key === 'ArrowDown') {
       event.preventDefault();
-      const currentOffset = parseFloat(event.currentTarget.value) || 0;
-      const isIncrease = event.key === 'ArrowUp' || event.key === 'ArrowRight';
-      const nextOffset = roundValue(currentOffset + (isIncrease ? step : -step), dec);
-      onChange(index, roundValue(defaults[index] + nextOffset, dec));
+      const currentRelative = parseFloat(event.currentTarget.value) || scale / defaultScale;
+      const isIncrease = event.key === 'ArrowUp';
+      const nextRelative = roundValue(currentRelative + (isIncrease ? 0.1 : -0.1), 3);
+      onUpdate(id, { scale: Math.max(0.001, roundValue(nextRelative * defaultScale, 3)) });
     }
   };
 
-  return <div className="vector-field">
-    <label>{label}</label>
-    <div className="axis-inputs">
-      {(['X', 'Y', 'Z'] as const).map((axis, index) => <div className="axis-input" key={axis}>
-        <span className={`axis axis-${axis.toLowerCase()}`}>{axis}</span>
-        <input type="text" value={String(values[index] - defaults[index])}
-          onChange={(event) => {
-            const next: Vec3 = [...values] as Vec3;
-            next[index] = roundValue(defaults[index] + parseInput(event.target.value), dec);
-            onChange(index, next[index]);
-          }}
-          onBlur={(event) => {
-            const next: Vec3 = [...values] as Vec3;
-            next[index] = roundValue(defaults[index] + parseInput(event.target.value), dec);
-            onChange(index, next[index]);
-          }}
-          onKeyDown={(event) => handleKeyDown(event, index)}
-          aria-label={`${label} ${axis}`} />
-        {suffix && <small>{suffix}</small>}
-      </div>)}
-    </div>
-  </div>;
+  return (
+    <input
+      type="text"
+      value={draft}
+      onChange={(event) => setDraft(event.target.value)}
+      onBlur={(event) => commit(event.currentTarget.value)}
+      onKeyDown={handleKeyDown}
+    />
+  );
 }
 
 export default function Inspector({ nodes, selected, onSelect, onUpdate, onNormalize, onRemove, onToggleVisibility }: InspectorProps) {
@@ -97,34 +184,13 @@ export default function Inspector({ nodes, selected, onSelect, onUpdate, onNorma
         }} />
         <div className="vector-field scale-field">
           <label>Skala seragam</label>
-          <div className="scale-input-wrap"><span className="scale-icon">↗</span><input type="text" value={String(roundValue(selected.scale / selected.defaultScale, 1))}
-            onChange={(event) => {
-              const val = event.target.value;
-              if (val.trim() === '') {
-                onUpdate(selected.id, { scale: selected.defaultScale });
-              } else {
-                const nextRelative = roundValue(parseInput(val), 1);
-                onUpdate(selected.id, { scale: Math.max(0.001, roundValue(nextRelative * selected.defaultScale, 3)) });
-              }
-            }}
-            onBlur={(event) => {
-              const val = event.target.value;
-              if (val.trim() === '') {
-                onUpdate(selected.id, { scale: selected.defaultScale });
-              } else {
-                const nextRelative = roundValue(parseInput(val), 1);
-                onUpdate(selected.id, { scale: Math.max(0.001, roundValue(nextRelative * selected.defaultScale, 3)) });
-              }
-            }}
-            onKeyDown={(event) => {
-              if (event.key === 'ArrowUp' || event.key === 'ArrowDown' || event.key === 'ArrowLeft' || event.key === 'ArrowRight') {
-                event.preventDefault();
-                const currentRelative = parseFloat(event.currentTarget.value) || selected.scale / selected.defaultScale;
-                const isIncrease = event.key === 'ArrowUp' || event.key === 'ArrowRight';
-                const nextRelative = roundValue(currentRelative + (isIncrease ? 0.1 : -0.1), 1);
-                onUpdate(selected.id, { scale: Math.max(0.001, roundValue(nextRelative * selected.defaultScale, 3)) });
-              }
-            }} /></div>
+          <div className="scale-input-wrap"><span className="scale-icon">↗</span><ScaleInput
+            value={roundValue(selected.scale / selected.defaultScale, 3)}
+            defaultScale={selected.defaultScale}
+            scale={selected.scale}
+            id={selected.id}
+            onUpdate={(id, changes) => onUpdate(id, changes)}
+          /></div>
         </div>
         <VectorField label="Rotasi" values={selected.rotation} defaults={selected.defaultRotation} suffix="°" onChange={(axis, value) => {
           const next: Vec3 = [...selected.rotation] as Vec3;
