@@ -73,8 +73,9 @@ function VectorField({ label, values, defaults, suffix, onChange, step = 1 }: {
 export default function Inspector({ nodes, selected, onSelect, onUpdate, onNormalize, onRemove, onToggleVisibility }: InspectorProps) {
   return <aside className="inspector">
     <section className="panel-section node-section">
-      <div className="section-heading">
-        <div><span className="eyebrow">SCENE HIERARCHY</span><h2>Nodes <span className="count-pill">{nodes.length}</span></h2></div>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10, paddingBottom: 8, borderBottom: '1px solid #303947' }}>
+        <span style={{ fontSize: '10px', fontWeight: 600, letterSpacing: '.08em', color: '#aeb9c9' }}>Nodes</span>
+        <span className="count-pill" style={{ fontSize: '10px', padding: '2px 6px' }}>{nodes.length}</span>
       </div>
       {nodes.length === 0 ? <div className="tree-empty">Belum ada node. Impor model untuk mengisi scene.</div> :
         <div className="node-list">
