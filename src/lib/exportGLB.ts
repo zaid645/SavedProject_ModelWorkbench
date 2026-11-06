@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { GLTFExporter } from 'three/addons/exporters/GLTFExporter.js';
+import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import type { ModelNode } from './types';
 
 interface PaletteEntry {
@@ -32,8 +33,17 @@ function getMaterialColor(material: THREE.Material | undefined): THREE.Color {
   return color;
 }
 
+function colorKey(color: THREE.Color): string {
+  return color.getHexString(THREE.SRGBColorSpace);
+}
+
+function getMeshMaterials(mesh: THREE.Mesh): THREE.Material[] {
+  const list = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+  return list.length > 0 ? list : [undefined as unknown as THREE.Material];
+}
+
 function addPaletteColor(color: THREE.Color, palette: PaletteEntry[], indexByColor: Map<string, number>): number {
-  const key = color.getHexString(THREE.SRGBColorSpace);
+  const key = colorKey(color);
   const existing = indexByColor.get(key);
   if (existing !== undefined) return existing;
   const index = palette.length;
@@ -42,14 +52,23 @@ function addPaletteColor(color: THREE.Color, palette: PaletteEntry[], indexByCol
   return index;
 }
 
-function prepareMeshGeometry(mesh: THREE.Mesh, palette: PaletteEntry[], indexByColor: Map<string, number>): { geometry: THREE.BufferGeometry; paletteIndex: number } | null {
+/**
+ * Membuat geometri non-indexed yang sudah di-bake dengan `matrix`,
+ * lengkap dengan UV yang menunjuk ke piksel warna di tekstur palet.
+ */
+function prepareMeshGeometry(
+  mesh: THREE.Mesh,
+  matrix: THREE.Matrix4,
+  paletteSize: number,
+  indexByColor: Map<string, number>,
+): THREE.BufferGeometry | null {
   const source = mesh.geometry;
   if (!source?.getAttribute('position')) return null;
 
   let geometry = source.clone();
   if (geometry.index) {
     const indexedGeometry = geometry;
-    geometry = indexedGeometry.toNonIndexed();
+    geometry = indexedGeometry.toNonIndexed(); // group ikut terbawa
     indexedGeometry.dispose();
   }
   const positions = geometry.getAttribute('position');
@@ -57,32 +76,50 @@ function prepareMeshGeometry(mesh: THREE.Mesh, palette: PaletteEntry[], indexByC
     geometry.dispose();
     return null;
   }
+  const count = positions.count;
 
   const position = positions.clone();
+  position.applyMatrix4(matrix);
+
   const normal = geometry.getAttribute('normal')?.clone();
+  if (normal) {
+    normal.applyNormalMatrix(new THREE.Matrix3().getNormalMatrix(matrix));
+  }
 
-  const material = Array.isArray(mesh.material) ? mesh.material[0] : mesh.material;
-  const color = getMaterialColor(material);
-  const paletteIndex = addPaletteColor(color, palette, indexByColor);
+  // --- UV: tiap vertex menunjuk ke tengah piksel warna materialnya ---
+  const materials = getMeshMaterials(mesh);
+  const uv = new Float32Array(count * 2);
 
-  const uvCount = position.count;
-  const uv = new Float32Array(uvCount * 2);
-  for (let i = 0; i < uvCount; i += 1) {
-    uv[i * 2] = (paletteIndex + 0.5) / palette.length;
-    uv[i * 2 + 1] = 0.5;
+  const paint = (start: number, end: number, material: THREE.Material | undefined) => {
+    const index = indexByColor.get(colorKey(getMaterialColor(material))) ?? 0;
+    const u = (index + 0.5) / paletteSize;
+    for (let i = start; i < end; i++) {
+      uv[i * 2] = u;
+      uv[i * 2 + 1] = 0.5;
+    }
+  };
+
+  paint(0, count, materials[0]); // default untuk vertex yang tidak tercakup group
+  if (Array.isArray(mesh.material) && geometry.groups.length > 0) {
+    for (const group of geometry.groups) {
+      const end = Math.min(group.start + group.count, count);
+      paint(group.start, end, materials[group.materialIndex ?? 0] ?? materials[0]);
+    }
   }
 
   const clean = new THREE.BufferGeometry();
   clean.setAttribute('position', position);
   if (normal) clean.setAttribute('normal', normal);
+  else clean.computeVertexNormals();
   clean.setAttribute('uv', new THREE.BufferAttribute(uv, 2));
   clean.computeBoundingBox();
   clean.computeBoundingSphere();
 
-  return { geometry: clean, paletteIndex };
+  geometry.dispose();
+  return clean;
 }
 
-function createPaletteTexture(palette: PaletteEntry[]): THREE.CanvasTexture {
+function createPaletteTexture(palette: PaletteEntry[]): THREE.Texture {
   const canvas = document.createElement('canvas');
   canvas.width = Math.max(1, palette.length);
   canvas.height = 1;
@@ -103,13 +140,18 @@ function createPaletteTexture(palette: PaletteEntry[]): THREE.CanvasTexture {
   return texture;
 }
 
+function isStaticMesh(child: THREE.Object3D): child is THREE.Mesh {
+  const mesh = child as THREE.Mesh;
+  if (!mesh.isMesh) return false;
+  if ((mesh as THREE.SkinnedMesh).isSkinnedMesh) return false;
+  if ((mesh as THREE.InstancedMesh).isInstancedMesh) return false;
+  return true;
+}
+
 export async function exportCombinedGLB(nodes: ModelNode[]): Promise<{ blob: Blob; meshCount: number; paletteSize: number }> {
   if (nodes.length === 0) throw new Error('Tambahkan model terlebih dahulu.');
 
-  const palette: PaletteEntry[] = [];
-  const indexByColor = new Map<string, number>();
-  const meshes: THREE.Mesh[] = [];
-
+  // Terapkan transform semua node lebih dulu.
   for (const node of nodes) {
     node.object.position.set(...node.position);
     node.object.rotation.set(
@@ -119,56 +161,85 @@ export async function exportCombinedGLB(nodes: ModelNode[]): Promise<{ blob: Blo
     );
     node.object.scale.setScalar(node.scale);
     node.object.updateMatrixWorld(true);
+  }
 
+  // Pass 1: kumpulkan palet dari SEMUA material di tiap mesh.
+  const palette: PaletteEntry[] = [];
+  const indexByColor = new Map<string, number>();
+
+  for (const node of nodes) {
     node.object.traverse((child) => {
-      const mesh = child as THREE.Mesh;
-      if (!mesh.isMesh || (mesh as THREE.SkinnedMesh).isSkinnedMesh) return;
-      if ((mesh as THREE.InstancedMesh).isInstancedMesh) return;
-
-      const prepared = prepareMeshGeometry(mesh, palette, indexByColor);
-      if (!prepared) return;
-
-      const texture = createPaletteTexture(palette);
-      const meshMaterial = new THREE.MeshStandardMaterial({
-        map: texture,
-        color: 0xffffff,
-        roughness: 0.9,
-        metalness: 0,
-        side: THREE.DoubleSide,
-      });
-
-      const exportedMesh = new THREE.Mesh(prepared.geometry, meshMaterial);
-      exportedMesh.name = `${node.name || 'node'}-mesh-${meshes.length}`;
-      exportedMesh.position.copy(node.object.position);
-      exportedMesh.rotation.copy(node.object.rotation);
-      exportedMesh.scale.copy(node.object.scale);
-      meshes.push(exportedMesh);
+      if (!isStaticMesh(child)) return;
+      for (const material of getMeshMaterials(child)) {
+        addPaletteColor(getMaterialColor(material), palette, indexByColor);
+      }
     });
   }
 
-  if (meshes.length === 0) throw new Error('Tidak ada mesh statis yang dapat diekspor.');
+  const paletteTexture = createPaletteTexture(palette);
+  const sharedMaterial = new THREE.MeshStandardMaterial({
+    map: paletteTexture,
+    color: 0xffffff,
+    roughness: 0.9,
+    metalness: 0,
+    side: THREE.DoubleSide,
+  });
+
+  // Pass 2: satu mesh gabungan per node.
+  const exportedMeshes: THREE.Mesh[] = [];
+
+  for (const node of nodes) {
+    // Bake hanya transform RELATIF terhadap node; transform node dipasang di mesh hasil.
+    const nodeInverse = node.object.matrixWorld.clone().invert();
+    const geometries: THREE.BufferGeometry[] = [];
+
+    node.object.traverse((child) => {
+      if (!isStaticMesh(child)) return;
+      const relative = nodeInverse.clone().multiply(child.matrixWorld);
+      const geometry = prepareMeshGeometry(child, relative, palette.length, indexByColor);
+      if (geometry) geometries.push(geometry);
+    });
+
+    if (geometries.length === 0) continue;
+
+    const merged = mergeGeometries(geometries, false);
+    geometries.forEach((g) => g.dispose());
+    if (!merged) throw new Error(`Gagal menggabungkan geometri untuk "${node.name || 'model'}".`);
+
+    const exportedMesh = new THREE.Mesh(merged, sharedMaterial);
+    exportedMesh.name = node.name || 'model';
+    exportedMesh.position.copy(node.object.position);
+    exportedMesh.rotation.copy(node.object.rotation);
+    exportedMesh.scale.copy(node.object.scale);
+    exportedMeshes.push(exportedMesh);
+  }
+
+  if (exportedMeshes.length === 0) {
+    sharedMaterial.dispose();
+    paletteTexture.dispose();
+    throw new Error('Tidak ada mesh statis yang dapat diekspor.');
+  }
 
   const scene = new THREE.Scene();
   scene.name = 'Scene';
-  for (const m of meshes) scene.add(m);
+  for (const m of exportedMeshes) scene.add(m);
 
   const exporter = new GLTFExporter();
   const data = await new Promise<ArrayBuffer>((resolve, reject) => {
-    exporter.parse(scene, (result) => {
-      if (result instanceof ArrayBuffer) resolve(result);
-      else reject(new Error('Exporter tidak menghasilkan GLB biner.'));
-    }, reject, { binary: true, onlyVisible: true, trs: true, maxTextureSize: 16384 });
+    exporter.parse(
+      scene,
+      (result) => {
+        if (result instanceof ArrayBuffer) resolve(result);
+        else reject(new Error('Exporter tidak menghasilkan GLB biner.'));
+      },
+      reject,
+      { binary: true, onlyVisible: true, trs: true, maxTextureSize: 16384 },
+    );
   });
 
-  meshes.forEach((m) => {
-    m.geometry.dispose();
-    const mat = m.material;
-    if (Array.isArray(mat)) {
-      mat.forEach((material) => material.dispose());
-    } else if (mat) {
-      mat.dispose();
-    }
-  });
+  exportedMeshes.forEach((m) => m.geometry.dispose());
+  sharedMaterial.dispose();
+  paletteTexture.dispose();
 
-  return { blob: new Blob([data], { type: 'model/gltf-binary' }), meshCount: meshes.length, paletteSize: palette.length };
+  return { blob: new Blob([data], { type: 'model/gltf-binary' }), meshCount: exportedMeshes.length, paletteSize: palette.length };
 }

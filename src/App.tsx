@@ -90,19 +90,19 @@ export default function App() {
   const exportGLB = async () => {
     if (!nodes.length || busy) return;
     setBusy(true);
-    setMessage('Mengekspor setiap node sebagai mesh terpisah…');
+    setMessage('Mengekspor setiap model sebagai satu mesh gabungan…');
     setMessageKind('normal');
     try {
       const result = await exportCombinedGLB(nodes);
       const url = URL.createObjectURL(result.blob);
       const anchor = document.createElement('a');
       anchor.href = url;
-      anchor.download = 'scene-per-node.glb';
+      anchor.download = 'scene-per-model.glb';
       document.body.appendChild(anchor);
       anchor.click();
       anchor.remove();
       URL.revokeObjectURL(url);
-      setMessage(`GLB berhasil dibuat · ${result.meshCount} mesh (satu per node) · ${result.paletteSize} warna palet.`);
+      setMessage(`GLB berhasil dibuat · ${result.meshCount} mesh (satu per model) · ${result.paletteSize} warna palet.`);
       setMessageKind('success');
     } catch (error) {
       setMessage(error instanceof Error ? error.message : String(error));
